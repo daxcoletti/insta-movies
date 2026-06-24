@@ -224,9 +224,16 @@ de forma **incremental**:
   `DRIVE_DEST`.
 - crontab del usuario (timezone America/Argentina/Buenos_Aires):
   `30 23 * * * /home/dax/dev/insta-movies/run_daily.sh`
-- La descarga usa la **sesión guardada** de instaloader (`session-<user>`), no las
-  cookies de Chrome — por eso el cron corre headless sin navegador. Si la sesión
-  caduca, re-importar con `source ./setup.sh <PERFIL> --chrome`.
+- **Cookies vs sesión (importante):** Chrome es solo el *bootstrap* de una vez. En el
+  `setup.sh --chrome`, `import_cookies.py` lee las cookies de Chrome
+  (`~/.config/google-chrome/Profile 6/Cookies`) y guarda una **sesión independiente**
+  en `~/.config/instaloader/session-<user>` (~472 bytes). El cron diario hace
+  `load_session_from_file(<user>)` → usa **esa copia**, nunca Chrome
+  (`daily_update.py` no importa `browser_cookie3`). Por eso:
+    - corre headless: Chrome puede estar cerrado o deslogueado de Instagram;
+    - esa sesión tiene vida propia: Instagram puede invalidarla con el tiempo. Cuando
+      pase, el cron fallará con error de login en `daily.log` → regenerar con
+      `source ./setup.sh <PERFIL> --chrome` (vuelve a leer Chrome y reescribe la sesión).
 
 > Pendiente menor: 3 filas sin IMDb (post de colaboración + 2 de nicho) se reintentan
 > cada día porque "vacío" = "sin resolver". Es barato (3 lookups); si molesta, marcar
