@@ -19,8 +19,13 @@ recomendados en `movies.txt`.
 | `download_posts.py`   | Descarga los posts listándolos por `/api/v1/feed/user/` (fallback al GraphQL roto). |
 | `extract_movies.py`   | Recorre las imágenes descargadas y extrae los títulos vía Claude. |
 | `build_spreadsheet.py`| Arma una planilla (fecha, película, año, link, caption) con un renglón por post. |
-| `find_torrents.py`    | Busca el mejor torrent de cada película (vía Claude + apibay) y lo agrega como columna E. |
+| `find_torrents.py`    | Busca el mejor torrent de cada película (vía Claude + apibay) y lo agrega a la planilla. |
+| `daily_update.py`     | Actualización incremental: detecta posts nuevos, completa IMDb/torrent y sube a Drive. |
+| `run_daily.sh`        | Wrapper de cron: carga `.env`, activa el venv y corre `daily_update.py`; loguea a `daily.log`. |
 | `requirements.txt`    | Dependencias: `instaloader`, `anthropic`, `browser_cookie3`, `openpyxl`, `requests`. |
+
+Columnas de la planilla (`<PERFIL>_peliculas.csv` / `.xlsx`):
+**A** Fecha · **B** Película · **C** Año · **D** Link (post) · **E** IMDb · **F** Torrent · **G** Caption.
 
 ## Flujo
 
@@ -36,9 +41,12 @@ python extract_movies.py juan.amonda
 # 3. (Opcional) Planilla por post: fecha, película, año, link, caption
 python build_spreadsheet.py juan.amonda --login <TU_USUARIO_IG>
 
-# 4. (Opcional) Agregar el mejor torrent de cada película como columna E
+# 4. (Opcional) Agregar el mejor torrent de cada película
 python find_torrents.py juan.amonda
 ```
+
+Para el día a día no hace falta correr los pasos sueltos: `daily_update.py` los hace
+de forma incremental (ver abajo) y el cron lo dispara una vez por día.
 
 `setup.sh <PERFIL> [AUTH]` corre:
 `instaloader --no-videos --no-video-thumbnails --no-metadata-json --dirname-pattern="{profile}" [--login=USUARIO] <PERFIL>`
@@ -183,6 +191,46 @@ Cómo elige el candidato:
 >   prueba también el título recortado antes del `:` (`queries_for`).
 > - Lo que queda sin torrent son cortometrajes, films de festival, estrenos muy
 >   recientes (aún sin release) o alguna resolución de título errónea de Claude.
+
+## Automatización diaria (`daily_update.py` + cron + Google Drive)
+
+El perfil publica ~1 película por día. `daily_update.py` mantiene la planilla al día
+de forma **incremental**:
+
+1. Recorre el feed (`/api/v1/feed/user/`, newest-first) y junta solo los posts cuyo
+   shortcode no está ya en `<PERFIL>_peliculas.csv`. **Para de paginar apenas ve un
+   post conocido** → en un día normal hace una sola request.
+2. Por cada post nuevo: baja el thumbnail, parsea película/año, resuelve el título
+   original/inglés (Claude), busca **IMDb** y el mejor **torrent**.
+3. **Backfill**: completa la columna `IMDb` (y `Torrent`) en filas viejas que no la
+   tengan. La 1ª corrida puebla IMDb en toda la planilla; después no re-busca
+   torrents de los misses ya confirmados (eso es lo lento) — solo IMDb faltante.
+4. Reescribe CSV + XLSX y los **sube a Google Drive con rclone** (`rclone copy`
+   sobreescribe el mismo archivo in-place: mismo file ID, sin duplicar, link estable).
+
+- **IMDb**: vía la suggestion API pública `v3.sg.media-imdb.com/suggestion/x/<q>.json`
+  (sin key); filtra a títulos `tt…`, prefiere match por año y tipo película. Construye
+  `https://www.imdb.com/title/tt…/`. Cobertura en `juan.amonda`: 380/383.
+- **Google Drive**: remote rclone `drive:`; destino en `DRIVE_DEST` (default
+  `drive:insta-movies`). El OAuth client viejo estaba borrado; se limpió el
+  `client_id`/`client_secret` para usar el cliente por defecto de rclone y se
+  reconectó con `rclone config reconnect drive:`.
+
+### Cron y secretos
+
+- `run_daily.sh` carga `.env`, activa el venv, corre `daily_update.py` y loguea todo a
+  `daily.log` (con rotación a `.1` si supera 5 MB).
+- `.env` (chmod 600, **gitignored**): `ANTHROPIC_API_KEY`, `IG_LOGIN_USER`, `PROFILE`,
+  `DRIVE_DEST`.
+- crontab del usuario (timezone America/Argentina/Buenos_Aires):
+  `30 23 * * * /home/dax/dev/insta-movies/run_daily.sh`
+- La descarga usa la **sesión guardada** de instaloader (`session-<user>`), no las
+  cookies de Chrome — por eso el cron corre headless sin navegador. Si la sesión
+  caduca, re-importar con `source ./setup.sh <PERFIL> --chrome`.
+
+> Pendiente menor: 3 filas sin IMDb (post de colaboración + 2 de nicho) se reintentan
+> cada día porque "vacío" = "sin resolver". Es barato (3 lookups); si molesta, marcar
+> los misses para no reintentarlos.
 
 ## Notas / posibles mejoras
 
