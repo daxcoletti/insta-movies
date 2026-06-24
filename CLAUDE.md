@@ -19,7 +19,8 @@ recomendados en `movies.txt`.
 | `download_posts.py`   | Descarga los posts listándolos por `/api/v1/feed/user/` (fallback al GraphQL roto). |
 | `extract_movies.py`   | Recorre las imágenes descargadas y extrae los títulos vía Claude. |
 | `build_spreadsheet.py`| Arma una planilla (fecha, película, año, link, caption) con un renglón por post. |
-| `requirements.txt`    | Dependencias: `instaloader`, `anthropic`, `browser_cookie3`, `openpyxl`. |
+| `find_torrents.py`    | Busca el mejor torrent de cada película (vía Claude + apibay) y lo agrega como columna E. |
+| `requirements.txt`    | Dependencias: `instaloader`, `anthropic`, `browser_cookie3`, `openpyxl`, `requests`. |
 
 ## Flujo
 
@@ -34,6 +35,9 @@ python extract_movies.py juan.amonda
 
 # 3. (Opcional) Planilla por post: fecha, película, año, link, caption
 python build_spreadsheet.py juan.amonda --login <TU_USUARIO_IG>
+
+# 4. (Opcional) Agregar el mejor torrent de cada película como columna E
+python find_torrents.py juan.amonda
 ```
 
 `setup.sh <PERFIL> [AUTH]` corre:
@@ -148,6 +152,37 @@ con links clicables y fila de encabezado fija).
 - No usa Claude: a diferencia de `extract_movies.py` (que normaliza el título), acá el
   nombre es el textual del caption. En la corrida de `juan.amonda`: 383 posts, solo 1
   sin año (un post de colaboración que no es una recomendación individual).
+
+## Torrents (`find_torrents.py`)
+
+> ⚠️ Uso dual: busca torrents de películas con copyright. Es para uso personal;
+> verificá la legalidad en tu jurisdicción y preferí fuentes legales / dominio
+> público cuando puedas.
+
+Lee `<PERFIL>_peliculas.csv`, para cada película busca el mejor torrent y reescribe
+la planilla con **columna E = `Torrent`** (un magnet link; `Caption` pasa a F).
+Necesita `ANTHROPIC_API_KEY`.
+
+Cómo elige el candidato:
+1. **Resuelve el título original/inglés con Claude** (en lotes de 40), porque los
+   títulos de la planilla están en español y los releases usan el título original o
+   inglés (p. ej. `Amigos intocables` → *The Intouchables*, `La princesa Mononoke` →
+   *Princess Mononoke*).
+2. Busca en **apibay** (API de The Pirate Bay; YTS está bloqueado por DNS en algunos
+   entornos) probando `inglés+año`, `original+año`, `español+año` y variantes
+   recortadas del título.
+3. Filtra a categorías de **películas** (excluye TV) y acepta un candidato solo si
+   coincide el **año** o la mayoría de las **palabras del título** (evita falsos
+   positivos). Entre los aceptados elige por **seeders** (con bonus por 1080p/4K y
+   por año en el nombre). Arma el magnet con trackers públicos.
+
+> Gotchas de matching (aprendidos en `juan.amonda`, 357/383 ≈ 93% de aciertos):
+> - **Apóstrofos rompen apibay**: `Winter's Bone 2010` devuelve 0; hay que mandar
+>   `Winters Bone 2010` (`clean_query` quita apóstrofos rectos y tipográficos).
+> - **Subtítulos largos no matchean**: `Dr. Strangelove or: How I Learned…` falla; se
+>   prueba también el título recortado antes del `:` (`queries_for`).
+> - Lo que queda sin torrent son cortometrajes, films de festival, estrenos muy
+>   recientes (aún sin release) o alguna resolución de título errónea de Claude.
 
 ## Notas / posibles mejoras
 
