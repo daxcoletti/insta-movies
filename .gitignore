@@ -1,0 +1,23 @@
+# Entorno virtual
+venv/
+__pycache__/
+*.pyc
+
+# Sesiones / credenciales locales
+*.session
+session-*
+
+# Datos descargados: instaloader crea una carpeta por perfil con las imágenes y
+# captions. Agregá acá cada perfil que descargues.
+juan.amonda/
+mati.rampoldi/
+
+# Media descargada (por si quedan sueltas): instaloader las nombra con timestamp UTC.
+*_UTC.jpg
+*_UTC.png
+*_UTC.txt
+
+# Artefactos generados
+movies.txt
+*_peliculas.csv
+*_peliculas.xlsx

@@ -1,0 +1,4 @@
+instaloader>=4.10
+anthropic>=0.40
+browser_cookie3>=0.19
+openpyxl>=3.1
