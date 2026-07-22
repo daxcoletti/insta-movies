@@ -35,4 +35,8 @@ source venv/bin/activate || { echo "Error: no pude activar venv."; exit 1; }
 python daily_update.py "${PROFILE:-juan.amonda}"
 rc=$?
 echo ">> run_daily.sh terminó con código $rc"
+if [ "$rc" -ne 0 ]; then
+  "$HERE/notify_fail.sh" "insta-movies: falló la actualización de películas (código $rc)" \
+    "Revisá daily.log. Si es error de login/sesión de Instagram: source ./setup.sh juan.amonda --chrome"
+fi
 exit "$rc"

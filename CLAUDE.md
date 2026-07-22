@@ -22,6 +22,8 @@ recomendados en `movies.txt`.
 | `find_torrents.py`    | Busca el mejor torrent de cada película (vía Claude + apibay) y lo agrega a la planilla. |
 | `daily_update.py`     | Actualización incremental: detecta posts nuevos, completa IMDb/torrent y sube a Drive. |
 | `run_daily.sh`        | Wrapper de cron: carga `.env`, activa el venv y corre `daily_update.py`; loguea a `daily.log`. |
+| `notify_fail.sh`      | Notificación de escritorio (`notify-send -u critical`) cuando un wrapper de cron falla. |
+| `test_notify.sh`      | Prueba manual de la notificación + diagnóstico (estado de "no molestar"). |
 | `requirements.txt`    | Dependencias: `instaloader`, `anthropic`, `browser_cookie3`, `openpyxl`, `requests`. |
 
 Columnas de la planilla (`<PERFIL>_peliculas.csv` / `.xlsx`):
@@ -234,10 +236,137 @@ de forma **incremental**:
     - esa sesión tiene vida propia: Instagram puede invalidarla con el tiempo. Cuando
       pase, el cron fallará con error de login en `daily.log` → regenerar con
       `source ./setup.sh <PERFIL> --chrome` (vuelve a leer Chrome y reescribe la sesión).
+      Para regenerar **solo la sesión** sin re-descargar posts:
+      `./venv/bin/python import_cookies.py chrome <user>`.
+
+> ⚠️ **Gotcha (sesión inválida ≠ "perfil no existe", jul-2026):** cuando Instagram
+> invalida la sesión, `Profile.from_username()` falla con
+> `ProfileNotExistsException: Profile X does not exist.` — el perfil existe; es la
+> consulta autenticada la que devuelve 401/429. Señal inequívoca: los **dos** crons
+> (películas y música, perfiles distintos) fallan el mismo día con ese error.
+> Probando la sesión a mano se ve el `401 "Please wait a few minutes"` / `429`.
+> Fix: regenerar la sesión (arriba). La sesión original duró ~6 meses; una
+> regeneración de jul-2026 duró solo 5 días.
+
+- **Notificación de falla (desktop):** si `daily_update.py` / `daily_music_update.py`
+  terminan ≠0, los wrappers llaman a `notify_fail.sh` → `notify-send -u critical`
+  (persiste hasta cerrarla). Como cron corre sin entorno gráfico, el script setea
+  `DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus` y `DISPLAY=:0`.
+  Prueba manual: `./test_notify.sh`.
+  > Gotcha: el modo **"no molestar"** de MATE (y del indicador ayatana) suprime los
+  > popups en silencio — el daemon acepta la notificación (asigna id) pero no la
+  > muestra. `test_notify.sh` chequea `org.mate.NotificationDaemon do-not-disturb` y
+  > `org.ayatana.indicator.notifications do-not-disturb` y avisa si están en `true`.
 
 > Pendiente menor: 3 filas sin IMDb (post de colaboración + 2 de nicho) se reintentan
 > cada día porque "vacío" = "sin resolver". Es barato (3 lookups); si molesta, marcar
 > los misses para no reintentarlos.
+
+## Pipeline de música (`@owencutts`)
+
+Variante del pipeline pensada para perfiles que **hablan de canciones** (default:
+`owencutts`, *"Old Music Friday"*). En vez de un título de película saca **canción +
+artista**, arma `<PERFIL>_canciones.csv/.xlsx` y mantiene una **playlist de Spotify**
+acumulativa. Reutiliza toda la infra de Instagram (sesión/cookies, el workaround del
+GraphQL, cron + Drive); lo nuevo es el **núcleo de identificación** y **Spotify**.
+
+| Archivo | Rol |
+|---------|-----|
+| `ig_feed.py`               | Helpers compartidos: lista posts por `/api/v1/feed/user/` y extrae caption/fecha/shortcode + **URLs de thumbnail y video** de cada item. |
+| `identify_songs.py`        | Identifica `canción + artista` por post **en capas**, parando apenas una funciona. |
+| `transcribe.py`            | Capa 3: baja el mp4 del Reel y lo transcribe vía APIs cloud (Groq→Deepgram→Gladia). |
+| `spotify_sync.py`          | Canoniza cada tema (búsqueda Spotify → título/artista/álbum/año/link) y mantiene la playlist. |
+| `spotify_auth.py`          | Autorización OAuth inicial (una vez). |
+| `build_music_spreadsheet.py` | Batch: recorre todo el perfil, identifica, canoniza, escribe la planilla y sincroniza la playlist. |
+| `daily_music_update.py`    | Incremental (posts nuevos + backfill de Spotify) + playlist + Drive. |
+| `run_daily_music.sh`       | Wrapper de cron (loguea a `daily_music.log`). |
+
+Columnas: **A** Fecha · **B** Canción · **C** Artista · **D** Álbum · **E** Año ·
+**F** Link (post) · **G** Spotify · **H** Caption.
+
+### Identificación en capas (`identify_songs.py`)
+
+Por cada post, en orden y cortando apenas una resuelve:
+1. **Caption** → Claude (texto) extrae `{"cancion", "artista"}` o `NONE`.
+2. **Imagen** → Claude Vision sobre el thumbnail del Reel (texto sobreimpreso).
+3. **Audio** → se baja el mp4 (URL directa del feed, sin instaloader), se extrae el
+   audio con `ffmpeg` (mp3 mono) y se transcribe; Claude lee la transcripción.
+
+> ⚠️ **Gotcha clave:** la Claude API **no procesa audio**. Por eso la capa 3 transcribe
+> primero y recién después Claude lee **texto**. La transcripción **reutiliza el enfoque
+> y las API keys de `~dax/dev/meet-transcriptions`** (en el equipo `agente`): rota entre
+> **Groq (`whisper-large-v3`) → Deepgram (`nova-3`) → Gladia → whisper local en `agente`**,
+> usando el primero que responda y saltando al siguiente ante un `429`. Detalles:
+> - **Groq admite varias keys** para más cuota: `GROQ_API_KEY` (acepta varias separadas
+>   por coma) + `GROQ_API_KEY_2`, `_3`, … `_groq` las rota cuando una da 429.
+> - **Fallback final sin cuota:** si las 3 APIs cloud se agotan, se transcribe en `agente`
+>   con el **whisper CLI de OpenAI** (`~/.local/bin/whisper`, modelo `WHISPER_SSH_MODEL`,
+>   default `large-v3-turbo`) pipeando el audio por SSH. Se configura con `WHISPER_SSH_HOST`
+>   (default `agente`; vaciar para desactivar). Requiere acceso SSH sin password al equipo.
+> - Keys/host en `.env`: `GROQ_API_KEY[_n]`, `DEEPGRAM_API_KEY`, `GLADIA_API_KEY`,
+>   `WHISPER_SSH_HOST`, `WHISPER_SSH_MODEL`. Requiere `ffmpeg`. La capa 3 se salta con `--no-audio`.
+
+> ⚠️ **Gotcha (rate-limit de Spotify):** la API de búsqueda de Spotify tiene un límite
+> que, ante uso intenso (varias corridas full el mismo día), devuelve `429` con un
+> `Retry-After` de **horas** (se vieron ~20 h). Por eso `get_spotify()` crea el cliente con
+> `retries=0`: ante un 429 tira excepción al instante (la capturamos y degradamos: la
+> canción se guarda sin datos de Spotify y el `daily` la rellena después) en vez de
+> **dormir** el `Retry-After` y colgar el proceso. `build_music_spreadsheet.py` guarda
+> **checkpoint cada 25** posts y es **reanudable** (saltea lo que ya está en
+> `<PERFIL>_seen.txt`), así un corte no pierde trabajo.
+
+- Modelo Claude: `claude-sonnet-4-6` (igual que `extract_movies.py`).
+
+### Spotify (`spotify_sync.py` / `spotify_auth.py`)
+
+Cumple **doble función**: canoniza el tema (reemplaza el rol de IMDb/torrent) y
+alimenta la playlist. Usa `spotipy` con OAuth Authorization Code (hace falta para
+modificar playlists).
+
+- **Bootstrap (una vez):** crear una app en https://developer.spotify.com/dashboard,
+  con redirect URI `http://127.0.0.1:8888/callback` (Spotify ya **no** acepta
+  `localhost`). Poner `SPOTIPY_CLIENT_ID` / `SPOTIPY_CLIENT_SECRET` /
+  `SPOTIPY_REDIRECT_URI` en `.env`, y correr `python spotify_auth.py` (abre el navegador).
+- El token queda en **`.spotify_cache`** (gitignored); `spotipy` lo **refresca solo**, así
+  el cron corre headless — mismo patrón que la sesión de Instagram y el OAuth de rclone.
+- `SPOTIFY_PLAYLIST_NAME` (default `Old Music Friday — Owen Cutts`): playlist privada y
+  acumulativa; `add_tracks` deduplica contra lo que ya tiene.
+
+> ⚠️ **Gotcha (migración 11-feb-2026):** Spotify deprecó los endpoints viejos de
+> playlists y `spotipy` (≤2.26.0) los sigue usando por debajo, así que sus helpers
+> `user_playlist_create` y `playlist_add_items` devuelven **403** aunque la cuenta tenga
+> Premium, esté en la allowlist y los scopes sean correctos (la lectura sí anda; lo roto
+> son los POST). `spotify_sync.py` llama directo a los endpoints nuevos
+> `POST /v1/me/playlists` y `POST /v1/playlists/{id}/items` vía `sp._post(...)`.
+> La misma migración **renombró el campo del track al LEER** items de playlist: ahora
+> viene bajo `item` (antes `track`), y el GET de `/tracks` sin `fields` da 403. Por eso
+> `existing_uris()` pide `fields="items.item.uri,items.track.uri,next"` y acepta cualquiera.
+> Para reconstruir una playlist sin duplicados: `PUT /v1/playlists/{id}/items` (reemplaza
+> con ≤100) + `POST .../items` para el resto.
+
+### Flujo
+
+```bash
+# 0. (una vez) sesión de IG por cookies del navegador + autorizar Spotify
+source ./setup.sh owencutts --chrome
+python spotify_auth.py            # con las SPOTIPY_* en el entorno
+
+# 1. Planilla completa + playlist (--no-audio para probar más rápido/barato)
+export ANTHROPIC_API_KEY=sk-ant-...
+python build_music_spreadsheet.py owencutts --login <TU_USUARIO_IG>
+
+# 2. Día a día: incremental + playlist + Drive (lo dispara el cron)
+python daily_music_update.py owencutts
+```
+
+### Cron y secretos (música)
+
+- `run_daily_music.sh` carga `.env`, activa el venv, corre `daily_music_update.py` y
+  loguea a `daily_music.log`.
+- `.env` suma a lo de películas: `SPOTIPY_CLIENT_ID`, `SPOTIPY_CLIENT_SECRET`,
+  `SPOTIPY_REDIRECT_URI`, `SPOTIFY_PLAYLIST_NAME`, `MUSIC_PROFILE` (default `owencutts`).
+- crontab (ejemplo, 23:45 para no pisar el de películas de las 23:30):
+  `45 23 * * * /home/dax/dev/insta-movies/run_daily_music.sh`
 
 ## Notas / posibles mejoras
 
