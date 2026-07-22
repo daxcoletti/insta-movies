@@ -3,3 +3,6 @@ anthropic>=0.40
 browser_cookie3>=0.19
 openpyxl>=3.1
 requests>=2.25
+# Pipeline de música (@owencutts): Spotify. La transcripción usa APIs cloud
+# (Groq/Deepgram/Gladia) vía requests, sin dependencias extra.
+spotipy>=2.23

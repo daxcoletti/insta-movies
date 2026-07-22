@@ -7,15 +7,20 @@ __pycache__/
 .env
 daily.log
 daily.log.1
+daily_music.log
+daily_music.log.1
+full_music_run.log
 
 # Sesiones / credenciales locales
 *.session
 session-*
+.spotify_cache
 
 # Datos descargados: instaloader crea una carpeta por perfil con las imágenes y
 # captions. Agregá acá cada perfil que descargues.
 juan.amonda/
 mati.rampoldi/
+owencutts/
 
 # Media descargada (por si quedan sueltas): instaloader las nombra con timestamp UTC.
 *_UTC.jpg
@@ -26,3 +31,6 @@ mati.rampoldi/
 movies.txt
 *_peliculas.csv
 *_peliculas.xlsx
+*_canciones.csv
+*_canciones.xlsx
+*_seen.txt
