@@ -258,6 +258,33 @@ de forma **incremental**:
 > Fix: regenerar la sesión (arriba). La sesión original duró ~6 meses; una
 > regeneración de jul-2026 duró solo 5 días.
 
+> ⚠️ **Gotcha (`feedback_required` ≠ sesión vencida, sep-2026):** desde el 2026-09-03
+> los dos crons fallan con `400 Bad Request` en `/api/v1/feed/user/<id>/`. Acá la
+> sesión está **sana**: el login carga, `Profile.from_username()` resuelve y
+> `import_cookies.py` verifica la cookie OK — lo que falla es solo el endpoint del
+> feed. El cuerpo de la respuesta lo aclara (hay que mirarlo, `raise_for_status()`
+> lo tapa):
+>
+> ```json
+> {"message":"feedback_required","spam":true,"feedback_title":"Try Again Later",
+>  "feedback_message":"We limit how often you can do certain things on Instagram…"}
+> ```
+>
+> Es un **soft-block por actividad automatizada**, a nivel cuenta+IP, no un bug del
+> código ni algo que arregle regenerar la sesión. Por eso también falla `setup.sh`:
+> el listado por GraphQL cae (deprecado, esperado) y el fallback `download_posts.py`
+> pega contra el mismo endpoint marcado. Qué hacer: **parar los crons unos días**
+> (cada corrida renueva el flag), entrar a instagram.com con esa cuenta desde el
+> navegador y despejar cualquier aviso de "actividad inusual", y al volver espaciar
+> las corridas. Diagnóstico rápido:
+>
+> ```bash
+> ./venv/bin/python -c "import instaloader,ig_feed;L=ig_feed.build_loader('<user>');\
+> p=instaloader.Profile.from_username(L.context,'<perfil>');\
+> print(L.context._session.get(f'https://www.instagram.com/api/v1/feed/user/{p.userid}/',\
+> headers={**ig_feed.HEADERS},params={'count':1}).text[:300])"
+> ```
+
 - **Notificación de falla (desktop):** si `daily_update.py` / `daily_music_update.py`
   terminan ≠0, los wrappers llaman a `notify_fail.sh` → `notify-send -u critical`
   (persiste hasta cerrarla). Como cron corre sin entorno gráfico, el script setea
