@@ -4,8 +4,11 @@
 # @owencutts (incremental), sincroniza la playlist de Spotify y sube la planilla a
 # Google Drive. Pensado para correr una vez por día.
 #
-# Cron (ejemplo, todos los días 23:45):
-#   45 23 * * * /home/dax/dev/insta-movies/run_daily_music.sh
+# Cron (cada 3 días, 23:45 — desfasado del de películas):
+#   45 23 */3 * * /home/dax/dev/insta-movies/run_daily_music.sh
+#
+# Códigos de salida: 0 OK · 2 Instagram bloqueó el listado (no es una falla) ·
+# otro = error real.
 #
 # Toda la salida va a daily_music.log en esta carpeta.
 
@@ -49,7 +52,13 @@ if [ -n "$NUEVOS" ]; then
   "$HERE/notify_new.sh" "insta-movies: $QUE de ${MUSIC_PROFILE:-owencutts}" "$NUEVOS"
 fi
 
-if [ "$rc" -ne 0 ]; then
+# Código 2 = Instagram no nos deja listar los posts (soft-block / rate-limit).
+# No es una falla del pipeline: no hay nada que arreglar y la sesión está sana,
+# así que se avisa distinto y sin instrucciones de regenerar nada.
+if [ "$rc" -eq 2 ]; then
+  "$HERE/notify_blocked.sh" "insta-movies: Instagram bloqueó el listado de canciones" \
+    "La planilla quedó como estaba. El bloqueo se libera solo; la próxima corrida reintenta."
+elif [ "$rc" -ne 0 ]; then
   "$HERE/notify_fail.sh" "insta-movies: falló la actualización de música (código $rc)" \
     "Revisá daily_music.log. Si es error de login/sesión de Instagram: source ./setup.sh owencutts --chrome"
 elif [ -z "$NUEVOS" ]; then

@@ -1,10 +1,17 @@
 #!/usr/bin/env bash
 #
 # run_daily.sh — wrapper para cron: actualiza la planilla de películas (incremental)
-# y la sube a Google Drive. Pensado para correr una vez por día.
+# y la sube a Google Drive.
 #
-# Cron (ejemplo, todos los días 23:30):
-#   30 23 * * * /home/dax/dev/insta-movies/run_daily.sh
+# Cron (cada 3 días, 23:30):
+#   30 23 */3 * * /home/dax/dev/insta-movies/run_daily.sh
+#
+# Cada 3 días y no a diario: el perfil no publica todos los días y espaciar las
+# corridas baja la chance del soft-block de Instagram. Como la actualización es
+# incremental, una corrida recupera todo lo publicado desde la anterior.
+#
+# Códigos de salida: 0 OK · 2 Instagram bloqueó el listado (no es una falla) ·
+# otro = error real.
 #
 # Toda la salida va a daily.log en esta carpeta.
 
@@ -48,7 +55,13 @@ if [ -n "$NUEVOS" ]; then
   "$HERE/notify_new.sh" "insta-movies: $QUE de ${PROFILE:-juan.amonda}" "$NUEVOS"
 fi
 
-if [ "$rc" -ne 0 ]; then
+# Código 2 = Instagram no nos deja listar los posts (soft-block / rate-limit).
+# No es una falla del pipeline: no hay nada que arreglar y la sesión está sana,
+# así que se avisa distinto y sin instrucciones de regenerar nada.
+if [ "$rc" -eq 2 ]; then
+  "$HERE/notify_blocked.sh" "insta-movies: Instagram bloqueó el listado de películas" \
+    "$(printf 'La planilla quedó como estaba. El bloqueo se libera solo; la próxima corrida reintenta.\n\nMientras tanto podés agregar los que falten a mano:\n  python add_posts.py <link> ...')"
+elif [ "$rc" -ne 0 ]; then
   "$HERE/notify_fail.sh" "insta-movies: falló la actualización de películas (código $rc)" \
     "Revisá daily.log. Si es error de login/sesión de Instagram: source ./setup.sh juan.amonda --chrome"
 elif [ -z "$NUEVOS" ]; then

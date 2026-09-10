@@ -21,8 +21,10 @@ recomendados en `movies.txt`.
 | `build_spreadsheet.py`| Arma una planilla (fecha, película, año, link, caption) con un renglón por post. |
 | `find_torrents.py`    | Busca el mejor torrent de cada película (vía Claude + apibay) y lo agrega a la planilla. |
 | `daily_update.py`     | Actualización incremental: detecta posts nuevos, completa IMDb/torrent y sube a Drive. |
+| `add_posts.py`        | Agrega posts sueltos a la planilla **por link**, vía `/api/v1/media/<id>/info/`. Escape hatch para cuando Instagram bloquea el listado. |
 | `run_daily.sh`        | Wrapper de cron: carga `.env`, activa el venv y corre `daily_update.py`; loguea a `daily.log`. |
 | `notify_fail.sh`      | Notificación de escritorio (`notify-send -u critical`) cuando un wrapper de cron falla. |
+| `notify_blocked.sh`   | Notificación cuando Instagram bloquea el listado (código 2): ícono de advertencia, no de error — no hay nada que arreglar. |
 | `notify_new.sh`       | Notificación de escritorio cuando un cron detecta posts nuevos (ícono info, misma urgencia). |
 | `notify_ok.sh`        | Notificación de escritorio cuando un cron termina OK sin posts nuevos (ícono tilde, misma urgencia). |
 | `test_notify.sh`      | Prueba manual de la notificación + diagnóstico (estado de "no molestar"). |
@@ -228,6 +230,58 @@ de forma **incremental**:
   `client_id`/`client_secret` para usar el cliente por defecto de rclone y se
   reconectó con `rclone config reconnect drive:`.
 
+### Resiliencia del listado (`ig_feed.py`)
+
+Instagram viene rompiendo **una vía por vez**, así que listar posts dejó de ser un
+endpoint fijo y pasó a ser una **cadena de fallback**. Toda la lógica de red vive en
+`ig_feed.py` (los dos pipelines la comparten: un cambio se arregla en un solo lugar).
+
+`fetch_new_items()` prueba en orden y se queda con la primera que responda:
+
+| # | Endpoint | Alcance | Sobrevive al soft-block |
+|---|----------|---------|--------------------------|
+| 1 | `/api/v1/feed/user/<id>/` | todo el perfil, paginado | ✗ |
+| 2 | `/api/v1/users/web_profile_info/` | los ~12 últimos, sin paginar | a veces (da 429 aparte) |
+
+Los ~12 del fallback alcanzan de sobra para el incremental (el perfil publica ~1 post
+por día, y el cron corre cada 3). Si **todos** los que trae son nuevos avisa por
+stderr, porque puede haber más atrás que no llega a ver.
+
+Aparte de la cadena:
+
+- **`FeedUnavailable`** distingue "Instagram no me deja listar" de "la sesión venció"
+  o "el perfil no existe" — que era justo la confusión de jul-2026.
+- **El bloqueo no se reintenta.** `_looks_blocked()` lo detecta leyendo el *cuerpo*
+  (Instagram lo manda con status 400, así que `raise_for_status()` lo tapaba), y
+  aborta esa estrategia al instante: reintentar no cambia el resultado y **renueva el
+  flag**. Lo que sí se reintenta, con backoff exponencial + jitter, es lo transitorio
+  (429 y 5xx).
+- **`iter_feed_items()` no tiene fallback** porque necesita el listado completo y el
+  perfil web solo da 12. Pero `build_music_spreadsheet.py` es reanudable: si el scan
+  se corta a la mitad, guarda lo procesado y sale con 2; al reintentar sigue desde
+  `<PERFIL>_seen.txt`.
+- **`fetch_item_by_shortcode()`** trae un post por `/api/v1/media/<id>/info/`, que
+  **sigue respondiendo 200 con el feed bloqueado**. Es lo que usa `add_posts.py`.
+
+Código de salida **2** = bloqueado, en los dos dailies y en el build de música. Los
+wrappers lo notifican con `notify_blocked.sh` (ícono de advertencia) en vez de
+`notify_fail.sh`: no hay nada que arreglar.
+
+### Agregar posts a mano (`add_posts.py`)
+
+Cuando el listado está bloqueado pero necesitás la planilla al día, `add_posts.py`
+recibe los links que ves en el navegador y hace **lo mismo que el daily con un post
+nuevo** (parseo del caption, IMDb, torrent, CSV + XLSX, subida a Drive); lo único que
+cambia es de dónde salen los posts.
+
+```bash
+python add_posts.py https://www.instagram.com/p/ABC123/ DEF456
+python add_posts.py --profile juan.amonda --no-drive <links...>
+```
+
+Acepta link de post, de reel o el shortcode pelado; saltea los que ya están en la
+planilla y verifica que el post sea del perfil correcto antes de agregarlo.
+
 ### Cron y secretos
 
 - `run_daily.sh` carga `.env`, activa el venv, corre `daily_update.py` y loguea todo a
@@ -235,7 +289,11 @@ de forma **incremental**:
 - `.env` (chmod 600, **gitignored**): `ANTHROPIC_API_KEY`, `IG_LOGIN_USER`, `PROFILE`,
   `DRIVE_DEST`.
 - crontab del usuario (timezone America/Argentina/Buenos_Aires):
-  `30 23 * * * /home/dax/dev/insta-movies/run_daily.sh`
+  `30 23 */3 * * /home/dax/dev/insta-movies/run_daily.sh`
+  **Cada 3 días, no a diario:** el perfil no publica todos los días y espaciar las
+  corridas baja la chance del soft-block de Instagram. Como la actualización es
+  incremental, una corrida levanta todo lo publicado desde la anterior. (Ojo: `*/3`
+  es día-del-mes, así que el salto 31→1 queda de 1 día; no afecta al resultado.)
 - **Cookies vs sesión (importante):** Chrome es solo el *bootstrap* de una vez. En el
   `setup.sh --chrome`, `import_cookies.py` lee las cookies de Chrome
   (`~/.config/google-chrome/Profile 6/Cookies`) y guarda una **sesión independiente**
@@ -273,10 +331,17 @@ de forma **incremental**:
 > Es un **soft-block por actividad automatizada**, a nivel cuenta+IP, no un bug del
 > código ni algo que arregle regenerar la sesión. Por eso también falla `setup.sh`:
 > el listado por GraphQL cae (deprecado, esperado) y el fallback `download_posts.py`
-> pega contra el mismo endpoint marcado. Qué hacer: **parar los crons unos días**
-> (cada corrida renueva el flag), entrar a instagram.com con esa cuenta desde el
-> navegador y despejar cualquier aviso de "actividad inusual", y al volver espaciar
-> las corridas. Diagnóstico rápido:
+> pega contra el mismo endpoint marcado.
+>
+> **Comprobado (sep-2026):** entrar a instagram.com desde el navegador y reimportar
+> las cookies **no lo destraba** — la sesión nueva verifica OK contra
+> `/api/v1/users/<id>/info/` y el feed sigue dando `feedback_required`. Confirma que
+> el flag es de la cuenta/IP y no del token.
+>
+> Qué hacer: **esperar** (se libera solo; cada reintento lo renueva) y mientras tanto
+> usar `add_posts.py` para agregar por link los posts que falten. Los crons ya no
+> hace falta pararlos a mano: corren cada 3 días y una corrida bloqueada sale con
+> código 2 sin tocar la planilla. Diagnóstico rápido:
 >
 > ```bash
 > ./venv/bin/python -c "import instaloader,ig_feed;L=ig_feed.build_loader('<user>');\
@@ -320,7 +385,7 @@ GraphQL, cron + Drive); lo nuevo es el **núcleo de identificación** y **Spotif
 
 | Archivo | Rol |
 |---------|-----|
-| `ig_feed.py`               | Helpers compartidos: lista posts por `/api/v1/feed/user/` y extrae caption/fecha/shortcode + **URLs de thumbnail y video** de cada item. |
+| `ig_feed.py`               | **Capa de red compartida por los dos pipelines**: lista posts con una cadena de fallback de endpoints, trae posts sueltos por shortcode, y extrae caption/fecha/shortcode + **URLs de thumbnail y video** de cada item. |
 | `identify_songs.py`        | Identifica `canción + artista` por post **en capas**, parando apenas una funciona. |
 | `transcribe.py`            | Capa 3: baja el mp4 del Reel y lo transcribe vía APIs cloud (Groq→Deepgram→Gladia). |
 | `spotify_sync.py`          | Canoniza cada tema (búsqueda Spotify → título/artista/álbum/año/link) y mantiene la playlist. |
@@ -413,8 +478,8 @@ python daily_music_update.py owencutts
   loguea a `daily_music.log`.
 - `.env` suma a lo de películas: `SPOTIPY_CLIENT_ID`, `SPOTIPY_CLIENT_SECRET`,
   `SPOTIPY_REDIRECT_URI`, `SPOTIFY_PLAYLIST_NAME`, `MUSIC_PROFILE` (default `owencutts`).
-- crontab (ejemplo, 23:45 para no pisar el de películas de las 23:30):
-  `45 23 * * * /home/dax/dev/insta-movies/run_daily_music.sh`
+- crontab (23:45 para no pisar el de películas de las 23:30):
+  `45 23 */3 * * /home/dax/dev/insta-movies/run_daily_music.sh`
 
 ## Notas / posibles mejoras
 

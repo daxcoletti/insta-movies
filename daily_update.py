@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-daily_update.py — actualización incremental diaria de la planilla de películas.
+daily_update.py — actualización incremental de la planilla de películas.
 
-Pensado para correr una vez por día desde cron. Pasos:
-  1. Mira el feed del perfil (newest-first) y detecta SOLO los posts nuevos
-     (los que no están ya en <PERFIL>_peliculas.csv). Para de paginar apenas
-     encuentra un post ya conocido — normalmente una sola página.
+Pensado para correr desde cron (hoy, cada 3 días). Pasos:
+  1. Lista los posts del perfil (newest-first) y detecta SOLO los nuevos (los que
+     no están ya en <PERFIL>_peliculas.csv). Para de paginar apenas encuentra un
+     post ya conocido — normalmente una sola página. El listado lo resuelve
+     ig_feed.fetch_new_items, que prueba varios endpoints en orden: si Instagram
+     bloquea uno, sigue por el otro en vez de cortar.
   2. Para cada post nuevo: baja su thumbnail, parsea película/año del caption,
      resuelve el título original/inglés (Claude), busca su ficha en IMDb y el
      mejor torrent.
@@ -18,6 +20,13 @@ Pensado para correr una vez por día desde cron. Pasos:
 Uso:
     export ANTHROPIC_API_KEY=sk-ant-...
     python daily_update.py [PERFIL] [--login USUARIO_IG]
+
+Códigos de salida:
+    0  OK
+    1  error de configuración (falta la API key, sesión ilegible, ...)
+    2  Instagram no permite listar los posts por ninguna vía (soft-block o
+       rate-limit). No es un bug ni una sesión vencida: se libera solo. Para
+       agregar posts mientras tanto, add_posts.py los trae de a uno por link.
 
 Variables de entorno (las setea run_daily.sh desde .env):
     ANTHROPIC_API_KEY   (requerida)
@@ -36,9 +45,10 @@ import urllib.parse
 
 import instaloader
 
+import ig_feed
 from build_spreadsheet import parse_title_year
-from download_posts import HEADERS as IG_HEADERS
 from find_torrents import best_torrent, clean_query, resolve_titles
+from ig_feed import FeedUnavailable
 
 COLS = ["Fecha", "Película", "Año", "Link", "IMDb", "Torrent", "Caption"]
 UA = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"}
@@ -83,31 +93,41 @@ def imdb_url(session, titles, year):
 
 # ---------- Feed incremental ----------
 
-def fetch_new_items(L, profile, known_codes):
-    """Items del feed cuyo shortcode no está en known_codes. Para apenas ve uno conocido."""
-    headers = {**IG_HEADERS, "Referer": f"https://www.instagram.com/{profile.username}/"}
-    url = f"https://www.instagram.com/api/v1/feed/user/{profile.userid}/"
-    new, max_id = [], None
-    while True:
-        params = {"count": 12}
-        if max_id:
-            params["max_id"] = max_id
-        resp = L.context._session.get(url, headers=headers, params=params,
-                                      timeout=L.context.request_timeout)
-        resp.raise_for_status()
-        data = resp.json()
-        items = data.get("items") or []
-        page_new = [it for it in items if it.get("code") not in known_codes]
-        new.extend(page_new)
-        if len(page_new) < len(items):       # apareció un post ya conocido
-            break
-        if not data.get("more_available"):
-            break
-        max_id = data.get("next_max_id")
-        if not max_id:
-            break
-        time.sleep(2)
-    return new
+def _download_thumb(L, profile, item, code):
+    """Baja la portada del post. Dos vías, porque los items pueden venir de
+    distintos endpoints: `from_iphone_struct` necesita la estructura completa del
+    feed, así que si el post vino del fallback del perfil web (normalizado, con
+    menos campos) tiramos directo a la URL de la imagen."""
+    try:
+        post = instaloader.Post.from_iphone_struct(L.context, item)
+        L.download_post(post, target=profile.username)
+        return
+    except Exception as e:
+        primera = f"{type(e).__name__}: {e}"
+
+    url = ig_feed.thumbnail_url(item)
+    if not url:
+        log(f"   ! no pude bajar el thumbnail de {code}: {primera}")
+        return
+    try:
+        os.makedirs(profile.username, exist_ok=True)
+        taken = item.get("taken_at")
+        stamp = (dt.datetime.fromtimestamp(taken, dt.timezone.utc)
+                 .strftime("%Y-%m-%d_%H-%M-%S_UTC")) if taken else code
+        destino = os.path.join(profile.username, f"{stamp}.jpg")
+        if not os.path.exists(destino):
+            r = L.context._session.get(url, headers=ig_feed.HEADERS, timeout=30)
+            r.raise_for_status()
+            with open(destino, "wb") as f:
+                f.write(r.content)
+        # El caption al lado, igual que instaloader, para extract_movies.py.
+        txt = os.path.splitext(destino)[0] + ".txt"
+        caption = ig_feed.caption_text(item)
+        if caption and not os.path.exists(txt):
+            with open(txt, "w", encoding="utf-8") as f:
+                f.write(caption)
+    except Exception as e:
+        log(f"   ! no pude bajar el thumbnail de {code}: {primera} / directo: {e}")
 
 
 def row_from_item(L, profile, item, download_thumb=True):
@@ -118,11 +138,7 @@ def row_from_item(L, profile, item, download_thumb=True):
     caption = ((item.get("caption") or {}).get("text") or "").strip()
     titulo, anio = parse_title_year(caption)
     if download_thumb:
-        try:
-            post = instaloader.Post.from_iphone_struct(L.context, item)
-            L.download_post(post, target=profile.username)
-        except Exception as e:
-            log(f"   ! no pude bajar el thumbnail de {code}: {e}")
+        _download_thumb(L, profile, item, code)
     return {
         "Fecha": fecha,
         "Película": titulo,
@@ -202,7 +218,8 @@ def main():
     args = ap.parse_args()
 
     if not os.environ.get("ANTHROPIC_API_KEY"):
-        log("Error: falta ANTHROPIC_API_KEY."); sys.exit(1)
+        log("Error: falta ANTHROPIC_API_KEY.")
+        return 1
 
     csv_path = f"{args.profile}_peliculas.csv"
     xlsx_path = f"{args.profile}_peliculas.xlsx"
@@ -225,8 +242,16 @@ def main():
     L.load_session_from_file(args.login)
     profile = instaloader.Profile.from_username(L.context, args.profile)
 
-    # 1. Posts nuevos.
-    new_items = fetch_new_items(L, profile, known_codes)
+    # 1. Posts nuevos. Si Instagram no nos deja listar por ninguna vía, salimos con
+    #    código 2: no es un bug ni una sesión vencida, y el wrapper lo notifica distinto.
+    try:
+        new_items = ig_feed.fetch_new_items(L, profile, known_codes)
+    except FeedUnavailable as e:
+        log(f">> Instagram no permite listar los posts ahora ({e}).")
+        log(">> No es la sesión: los posts sueltos siguen andando. Opciones:")
+        log("     - esperar (el soft-block se libera solo; cada reintento lo renueva);")
+        log(f"     - agregar los que falten a mano: python add_posts.py <link> ...")
+        return 2
     log(f">> Posts nuevos detectados: {len(new_items)}")
     new_rows = [row_from_item(L, profile, it) for it in reversed(new_items)]  # viejos->nuevos
     for r in new_rows:
@@ -281,7 +306,8 @@ def main():
         upload_to_drive([xlsx_path, csv_path])
 
     log(">> Listo.")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

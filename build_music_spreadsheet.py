@@ -168,7 +168,21 @@ def main() -> int:
 
     uris = []
     nuevos = 0
-    for item in ig_feed.iter_feed_items(L, profile):
+    bloqueado = ""
+
+    def feed_items():
+        """Envuelve el listado para que un bloqueo de Instagram A MITAD del scan no
+        tire la corrida: cortamos el recorrido y dejamos que siga el flujo normal,
+        que guarda la planilla y sincroniza la playlist con lo que sí se alcanzó.
+        Este script necesita el listado COMPLETO, que no tiene fallback — pero es
+        reanudable por <PERFIL>_seen.txt, así que lo procesado no se pierde."""
+        nonlocal bloqueado
+        try:
+            yield from ig_feed.iter_feed_items(L, profile)
+        except ig_feed.FeedUnavailable as e:
+            bloqueado = str(e)
+
+    for item in feed_items():
         code = ig_feed.shortcode(item)
         if code and code in seen:
             continue  # ya procesado en una corrida anterior -> saltear
@@ -220,6 +234,12 @@ def main() -> int:
     if args.drive:
         from daily_update import upload_to_drive
         upload_to_drive([xlsx_path, csv_path])
+
+    if bloqueado:
+        log(f">> ! El scan quedó CORTADO: Instagram no permite listar más ({bloqueado}).")
+        log(">> Lo procesado ya está guardado. Cuando se libere, volvé a correrlo y")
+        log(f">> sigue donde quedó (se saltea lo que ya está en {seen_path}).")
+        return 2
 
     log(f">> Listo: {len(out_rows)} canciones en la planilla.")
     return 0

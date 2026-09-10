@@ -92,7 +92,12 @@ def main() -> int:
     profile = ig_feed.load_profile(L, args.profile)
 
     # 1-2. Posts nuevos -> identificar + canonizar.
-    new_items = ig_feed.fetch_new_items(L, profile, known_codes)
+    try:
+        new_items = ig_feed.fetch_new_items(L, profile, known_codes)
+    except ig_feed.FeedUnavailable as e:
+        log(f">> Instagram no permite listar los posts ahora ({e}).")
+        log(">> No es la sesión; el soft-block se libera solo. Reintenta en la próxima corrida.")
+        return 2
     log(f">> Posts nuevos detectados: {len(new_items)}")
     new_rows, uris, new_codes = [], [], []
     for item in reversed(new_items):  # viejos -> nuevos

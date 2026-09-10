@@ -43,8 +43,11 @@ cp .env.example .env && chmod 600 .env   # completá tus keys acá
 python build_spreadsheet.py juan.amonda --login <TU_USUARIO_IG>
 python find_torrents.py juan.amonda
 
-# 2. Día a día (lo dispara el cron)
+# 2. Día a día (lo dispara el cron, cada 3 días)
 python daily_update.py juan.amonda
+
+# 3. Si Instagram bloqueó el listado: agregar posts a mano, por link
+python add_posts.py https://www.instagram.com/p/ABC123/ DEF456
 ```
 
 Para el pipeline de música: `python spotify_auth.py` una vez, después
@@ -62,12 +65,24 @@ Todas las credenciales van en `.env` (gitignored). Copiá `.env.example` y compl
 
 ## Limitaciones conocidas
 
+Instagram viene rompiendo una vía por vez, así que **listar posts es una cadena de
+fallback y no un endpoint fijo** (toda la lógica de red vive en `ig_feed.py`):
+
+| # | Endpoint | Alcance | Sobrevive al soft-block |
+|---|----------|---------|--------------------------|
+| 1 | `/api/v1/feed/user/<id>/` | todo el perfil, paginado | ✗ |
+| 2 | `/api/v1/users/web_profile_info/` | los ~12 últimos | a veces |
+
 - **GraphQL deprecado:** `Profile.get_posts()` de instaloader devuelve
   `400 "invalid request"`; no se arregla actualizando. De ahí el fallback al endpoint
   privado ([issue #2689](https://github.com/instaloader/instaloader/issues/2689)).
-- **`feedback_required`:** con uso sostenido, Instagram marca la cuenta y el endpoint
-  privado empieza a devolver `400 {"message":"feedback_required","spam":true}`. No es
-  un bug del código: hay que espaciar las corridas y esperar a que se libere.
+- **`feedback_required`:** con uso sostenido, Instagram marca la **cuenta y la IP** y
+  el endpoint privado empieza a devolver `400 {"message":"feedback_required"}`. No es
+  un bug del código, y **no lo arregla regenerar la sesión** (probado: la sesión nueva
+  verifica OK y el feed sigue bloqueado). Se libera solo, y cada reintento lo renueva
+  — por eso ese caso aborta al instante en vez de reintentar, y sale con código 2 sin
+  tocar la planilla. Mientras dura, `add_posts.py` agrega posts sueltos por link:
+  `/api/v1/media/<id>/info/` sigue respondiendo aunque el listado esté bloqueado.
 - **IPs de datacenter:** Instagram suele bloquear VPS, así que conviene correrlo desde
   una máquina residencial.
 - **Sesiones:** la sesión guardada tiene vida propia y en algún momento Instagram la
