@@ -10,6 +10,10 @@
 #                --chrome | --firefox | --chromium | --brave | --edge | --opera [USUARIO_IG]
 #                    importa la sesión ya iniciada en ESE navegador, en ESTA máquina.
 #                    (Solo sirve si corrés esto donde tenés el navegador logueado.)
+#                    USUARIO_IG = cuenta esperada: si el navegador tiene varias
+#                    cuentas logueadas (una por perfil de Chrome), solo se usa la
+#                    cookie de ESA cuenta. Si no lo pasás, se toma IG_LOGIN_USER
+#                    de .env (p. ej. daxcoletti).
 #                --sessionid <USUARIO_IG>   (con IG_SESSIONID en el entorno)
 #                    construye la sesión con tu cookie sessionid — útil si el
 #                    navegador logueado está en otra máquina. Ej:
@@ -34,7 +38,7 @@ _insta_setup_main() {
 
   local PROFILE="${1:-}"
   local AUTH="${2:-}"
-  local IG_USER_HINT="${3:-}"   # opcional: tu usuario de IG (fallback en modo navegador)
+  local IG_USER_HINT="${3:-}"   # opcional: usuario de IG esperado (modo navegador/sessionid)
 
   if [ -z "$PROFILE" ]; then
     echo "Error: falta el perfil de Instagram." >&2
@@ -88,8 +92,16 @@ _insta_setup_main() {
     login_args=(--login="$ig_user")
   elif [ -n "$browser" ]; then
     # Modo cookies: importar la sesión del navegador y bajar con ese usuario.
+    # El navegador puede tener varias cuentas de IG logueadas (una por perfil de
+    # Chrome); import_cookies.py solo acepta la cookie del usuario esperado.
+    # Si no vino por argumento, lo tomamos de IG_LOGIN_USER en .env.
+    local expected_user="$IG_USER_HINT"
+    if [ -z "$expected_user" ] && [ -f .env ]; then
+      expected_user="$(sed -n 's/^IG_LOGIN_USER=//p' .env | tail -n1)"
+      [ -n "$expected_user" ] && echo ">> Usuario de IG esperado (IG_LOGIN_USER de .env): @${expected_user}"
+    fi
     echo ">> Importando sesión de Instagram desde ${browser} ..."
-    ig_user="$(python import_cookies.py "$browser" "$IG_USER_HINT")" || {
+    ig_user="$(python import_cookies.py "$browser" "$expected_user")" || {
       echo "Error: no se pudo importar la sesión desde ${browser}." >&2
       return 1
     }

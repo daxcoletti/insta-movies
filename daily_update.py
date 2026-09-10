@@ -229,6 +229,9 @@ def main():
     new_items = fetch_new_items(L, profile, known_codes)
     log(f">> Posts nuevos detectados: {len(new_items)}")
     new_rows = [row_from_item(L, profile, it) for it in reversed(new_items)]  # viejos->nuevos
+    for r in new_rows:
+        log(f">> nuevo {r.get('Fecha') or '?'}: {r.get('Película') or '(sin título)'}"
+            f"{' (' + r['Año'] + ')' if r.get('Año') else ''}")
 
     all_rows = existing + new_rows
 

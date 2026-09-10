@@ -32,11 +32,27 @@ fi
 # shellcheck disable=SC1091
 source venv/bin/activate || { echo "Error: no pude activar venv."; exit 1; }
 
-python daily_update.py "${PROFILE:-juan.amonda}"
-rc=$?
+# Capturamos la salida de esta corrida (además del log) para poder notificar
+# los posts nuevos detectados (líneas ">> nuevo ...").
+RUN_OUT="$(mktemp)" || exit 1
+python daily_update.py "${PROFILE:-juan.amonda}" 2>&1 | tee "$RUN_OUT"
+rc="${PIPESTATUS[0]}"
 echo ">> run_daily.sh terminó con código $rc"
+
+NUEVOS="$(sed -n 's/^>> nuevo //p' "$RUN_OUT")"
+RESUMEN="$(sed -n 's/^>> Planilla actualizada: //p' "$RUN_OUT" | tail -n1)"
+rm -f "$RUN_OUT"
+if [ -n "$NUEVOS" ]; then
+  N="$(printf '%s\n' "$NUEVOS" | wc -l)"
+  [ "$N" -eq 1 ] && QUE="1 película nueva" || QUE="$N películas nuevas"
+  "$HERE/notify_new.sh" "insta-movies: $QUE de ${PROFILE:-juan.amonda}" "$NUEVOS"
+fi
+
 if [ "$rc" -ne 0 ]; then
   "$HERE/notify_fail.sh" "insta-movies: falló la actualización de películas (código $rc)" \
     "Revisá daily.log. Si es error de login/sesión de Instagram: source ./setup.sh juan.amonda --chrome"
+elif [ -z "$NUEVOS" ]; then
+  "$HERE/notify_ok.sh" "insta-movies: películas OK, sin posts nuevos" \
+    "Corrida de ${PROFILE:-juan.amonda} terminó bien. Planilla: ${RESUMEN:-sin cambios}"
 fi
 exit "$rc"

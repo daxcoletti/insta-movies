@@ -23,6 +23,8 @@ recomendados en `movies.txt`.
 | `daily_update.py`     | Actualización incremental: detecta posts nuevos, completa IMDb/torrent y sube a Drive. |
 | `run_daily.sh`        | Wrapper de cron: carga `.env`, activa el venv y corre `daily_update.py`; loguea a `daily.log`. |
 | `notify_fail.sh`      | Notificación de escritorio (`notify-send -u critical`) cuando un wrapper de cron falla. |
+| `notify_new.sh`       | Notificación de escritorio cuando un cron detecta posts nuevos (ícono info, misma urgencia). |
+| `notify_ok.sh`        | Notificación de escritorio cuando un cron termina OK sin posts nuevos (ícono tilde, misma urgencia). |
 | `test_notify.sh`      | Prueba manual de la notificación + diagnóstico (estado de "no molestar"). |
 | `requirements.txt`    | Dependencias: `instaloader`, `anthropic`, `browser_cookie3`, `openpyxl`, `requests`. |
 
@@ -95,8 +97,16 @@ Instagram está rate-limiteando (401 "Please wait a few minutes…").
 > Gotcha (perfiles de Chrome): `browser_cookie3.chrome()` lee por defecto el perfil
 > `Default`, pero muchas instalaciones usan perfiles con nombre (`Profile 6`, etc.)
 > y puede que `Default` ni exista. `import_cookies.py` recorre **todos** los perfiles
-> del navegador y elige el primero con cookie `sessionid`. Para mapear perfil↔cuenta:
-> mirá `~/.config/google-chrome/Local State` (`profile.info_cache`).
+> del navegador. Como puede haber **varias cuentas de IG logueadas** (una por perfil),
+> acepta un 2º argumento con el usuario **esperado** (p. ej. `daxcoletti`): verifica
+> online el dueño de cada cookie (`/api/v1/users/<ds_user_id>/info/`, mismo family
+> que el feed) y **solo usa la de esa cuenta**; las demás las ignora con aviso.
+> `setup.sh` pasa ese usuario desde el 3er argumento o, si falta, desde
+> `IG_LOGIN_USER` de `.env`. Sin usuario esperado: primera sesión encontrada (legacy).
+> Para mapear perfil↔cuenta: mirá `~/.config/google-chrome/Local State`
+> (`profile.info_cache`). Ojo: la cookie refleja la cuenta **activa** en instagram.com
+> de ese perfil de Chrome — si está switcheada a otra cuenta (p. ej. `trans.ti`),
+> hay que cambiar a la esperada en el navegador y reintentar.
 
 > Gotcha (stdout): `Instaloader.save_session_to_file()` loguea "Saved session to ..."
 > a **stdout**. Como `setup.sh` captura el stdout de `import_cookies.py` como nombre
@@ -253,6 +263,17 @@ de forma **incremental**:
   (persiste hasta cerrarla). Como cron corre sin entorno gráfico, el script setea
   `DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus` y `DISPLAY=:0`.
   Prueba manual: `./test_notify.sh`.
+- **Notificación de novedades (desktop):** los wrappers capturan la salida de la
+  corrida (`tee` a un temporal) y, si hay líneas `>> nuevo …` (ambos dailies imprimen
+  una por post detectado), llaman a `notify_new.sh` con el detalle (fecha + título).
+  Misma urgencia `critical` para que persista hasta la mañana; ícono
+  `dialog-information` para distinguirla de una falla. Aplica el mismo gotcha del
+  "no molestar" de arriba.
+- **Notificación de "sin novedades" (desktop):** si la corrida termina OK pero no hubo
+  posts nuevos, los wrappers llaman a `notify_ok.sh` (ícono `emblem-default`, misma
+  urgencia) con el resumen de la planilla. Así **toda** corrida de cron notifica algo:
+  falla (`notify_fail.sh`), novedades (`notify_new.sh`) o sin novedades (`notify_ok.sh`);
+  si a la mañana no hay ninguna notificación, el cron no corrió.
   > Gotcha: el modo **"no molestar"** de MATE (y del indicador ayatana) suprime los
   > popups en silencio — el daemon acepta la notificación (asigna id) pero no la
   > muestra. `test_notify.sh` chequea `org.mate.NotificationDaemon do-not-disturb` y
